@@ -8,13 +8,19 @@ import ujson as json
 
 
 class MySet(Dataset):
-    def __init__(self, input_file, data_ratio=1.0):
+    def __init__(self, input_file, data_ratio=1.0, kernel_size=3):
         with open('./data/' + input_file, 'r') as f:
             self.content = [json.loads(line) for line in f]
 
         if data_ratio < 1.0:
             n = int(len(self.content) * data_ratio)
             self.content = self.content[:n]
+
+        # remove trajectories shorter than kernel_size
+        original_len = len(self.content)
+        self.content = [x for x in self.content if len(x['lngs']) >= kernel_size]
+
+        print("Filtered {} short trips".format(original_len - len(self.content)))
 
         self.lengths = [len(x['lngs']) for x in self.content]
 
@@ -82,8 +88,13 @@ class BatchSampler:
         return (self.count + self.batch_size - 1) // self.batch_size
 
 
-def get_loader(input_file, batch_size, data_ratio=1.0):
-    dataset = MySet(input_file=input_file, data_ratio=data_ratio)
+def get_loader(input_file, batch_size, data_ratio=1.0, kernel_size=3):
+    dataset = MySet(
+        input_file=input_file,
+        data_ratio=data_ratio,
+        kernel_size=kernel_size
+    )
+
     batch_sampler = BatchSampler(dataset, batch_size)
 
     data_loader = DataLoader(
