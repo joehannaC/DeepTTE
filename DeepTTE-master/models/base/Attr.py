@@ -40,3 +40,4 @@ class Net(nn.Module):
         em_list.append(dist.view(-1, 1))
 
         return torch.cat(em_list, dim = 1)
+
