@@ -9,6 +9,7 @@ import inspect
 import datetime
 import argparse
 import data_loader
+import csv
 
 import torch
 import torch.nn as nn
@@ -87,13 +88,25 @@ def train(model, elogger, train_set, eval_set):
 
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
+    os.makedirs("./saved_weights", exist_ok=True)
+
+    best_rmse = float("inf")
+    best_model_path = os.path.join("./saved_weights", "best_model.pt")
+
     for epoch in range(args.epochs):
         print('Training on epoch {}'.format(epoch))
+
+        model.train()
 
         for input_file in train_set:
             print('Train on file {}'.format(input_file))
 
-            data_iter = data_loader.get_loader(input_file, args.batch_size, args.data_ratio)
+            data_iter = data_loader.get_loader(
+                input_file,
+                args.batch_size,
+                args.data_ratio,
+                args.kernel_size
+            )
 
             running_loss = 0.0
 
@@ -122,17 +135,56 @@ def train(model, elogger, train_set, eval_set):
                 )
             )
 
-        weight_name = '{}_{}'.format(args.log_file, str(datetime.datetime.now()))
-        elogger.log('Save weight file {}'.format(weight_name))
-        torch.save(model.state_dict(), './saved_weights/' + weight_name)
+        # save regular checkpoint
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        weight_name = f"{args.log_file}_epoch{epoch}_{timestamp}.pt"
+        save_path = os.path.join("./saved_weights", weight_name)
 
-    # only evaluate after ALL epochs are finished
+        elogger.log('Save weight file {}'.format(save_path))
+        torch.save(model.state_dict(), save_path)
+
+        latest_path = os.path.join("./saved_weights", "latest.pt")
+        torch.save(model.state_dict(), latest_path)
+
+        print(f"Saved checkpoint to: {save_path}")
+        print(f"Saved latest checkpoint to: {latest_path}")
+
+        # evaluate validation silently and save best model
+        metrics = evaluate(
+            model,
+            elogger,
+            eval_set,
+            save_result=False,
+            split_name='validation',
+            verbose=False
+        )
+
+        val_rmse = metrics['RMSE']
+        if val_rmse < best_rmse:
+            best_rmse = val_rmse
+            torch.save(model.state_dict(), best_model_path)
+            elogger.log(
+                'New best model saved at epoch {} with validation RMSE {:.6f}'.format(
+                    epoch, best_rmse
+                )
+            )
+
+    elogger.log('Best model path: {}'.format(best_model_path))
+    elogger.log('Best validation RMSE: {:.6f}'.format(best_rmse))
+
+        # load best model before final evaluation
+    model.load_state_dict(torch.load(best_model_path))
+
+    if torch.cuda.is_available():
+        model.cuda()
+
+    # final evaluation after all epochs
     print("\n" + "="*50)
-    print('\nFinal metrics after {} epochs:'.format(args.epochs))
+    print('Final metrics after {} epochs:'.format(args.epochs))
     print("="*50)
 
-    evaluate(model, elogger, train_set, save_result=False, split_name='train')
-    evaluate(model, elogger, eval_set, save_result=False, split_name='validation')
+    evaluate(model, elogger, train_set, save_result=True, split_name='train', verbose=True)
+    evaluate(model, elogger, eval_set, save_result=True, split_name='validation', verbose=True)
 
     print("="*50)
 
@@ -144,47 +196,75 @@ def write_result(fs, pred_dict, attr):
         fs.write('%.6f %.6f\n' % (label[i][0], pred[i][0]))
 
 
-def evaluate(model, elogger, eval_set, save_result=False, split_name='validation'):
+def evaluate(model, elogger, eval_set, save_result=False, split_name='validation', verbose=True):
     model.eval()
 
+    csv_file = None
+    writer = None
+
     if save_result:
-        fs = open('%s' % args.result_file, 'w')
+        csv_file = open(f'{split_name}_predictions.csv', 'w', newline='')
+        writer = csv.writer(csv_file)
+
+        writer.writerow([
+            "actual_time_min",
+            "predicted_time_min",
+            "error_min",
+            "error_sec",
+            "error_percent"
+        ])
 
     all_true = []
     all_pred = []
 
     for input_file in eval_set:
-        data_iter = data_loader.get_loader(input_file, args.batch_size, args.data_ratio)
+        data_iter = data_loader.get_loader(
+            input_file,
+            args.batch_size,
+            args.data_ratio,
+            args.kernel_size
+        )
 
         for idx, (attr, traj) in enumerate(data_iter):
             attr, traj = utils.to_var(attr), utils.to_var(traj)
 
             pred_dict, loss = model.eval_on_batch(attr, traj, config)
 
-            if save_result:
-                write_result(fs, pred_dict, attr)
-
             y_true = pred_dict['label'].data.cpu().numpy().reshape(-1)
             y_pred = pred_dict['pred'].data.cpu().numpy().reshape(-1)
 
-            all_true.extend(y_true.tolist())
-            all_pred.extend(y_pred.tolist())
+            for t, p in zip(y_true, y_pred):
+                error_min = abs(t - p)
+                error_sec = error_min * 60.0
+                error_pct = (error_min / t) * 100 if t != 0 else 0
 
-    if save_result:
-        fs.close()
+                if save_result:
+                    writer.writerow([
+                        float(t),
+                        float(p),
+                        float(error_min),
+                        float(error_sec),
+                        float(error_pct)
+                    ])
+
+                all_true.append(t)
+                all_pred.append(p)
+
+    if csv_file is not None:
+        csv_file.close()
 
     metrics = compute_metrics(all_true, all_pred)
 
-    msg = '{} Metrics'.format(split_name.upper())
-    print("-"*50)
-    print(msg)
-    print("MAE  : {:.6f}".format(metrics['MAE']))
-    print("RMSE : {:.6f}".format(metrics['RMSE']))
-    print("MAPE : {:.6f}".format(metrics['MAPE']))
-    print("R2   : {:.6f}".format(metrics['R2']))
-    print("-"*50)
+    if verbose:
+        print("=" * 50)
+        print(f"{split_name.upper()} METRICS")
+        print("MAE  :", metrics['MAE'])
+        print("RMSE :", metrics['RMSE'])
+        print("MAPE :", metrics['MAPE'])
+        print("R2   :", metrics['R2'])
+        print("=" * 50)
 
-    elogger.log(msg)
+    elogger.log(str(metrics))
 
     return metrics
 
