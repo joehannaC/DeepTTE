@@ -102,3 +102,4 @@ class Net(nn.Module):
 
         elif self.pooling_method == 'attention':
             return packed_hiddens, lens, self.attent_pooling(hiddens, lens, attr_t)
+
