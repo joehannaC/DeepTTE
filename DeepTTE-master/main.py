@@ -24,7 +24,7 @@ parser = argparse.ArgumentParser()
 # basic args
 parser.add_argument('--task', type=str)
 parser.add_argument('--batch_size', type=int, default=64)
-parser.add_argument('--epochs', type=int, default=10)
+parser.add_argument('--epochs', type=int, default=5)
 
 # evaluation args
 parser.add_argument('--weight_file', type=str)
@@ -40,7 +40,7 @@ parser.add_argument('--pooling_method', type=str)
 parser.add_argument('--alpha', type=float)
 
 # data ratio
-parser.add_argument('--data_ratio', type=float, default=1.0)
+parser.add_argument('--data_ratio', type=float, default=0.1)
 
 # log file name
 parser.add_argument('--log_file', type=str)
@@ -234,8 +234,8 @@ def evaluate(model, elogger, eval_set, save_result=False, split_name='validation
             y_pred = pred_dict['pred'].data.cpu().numpy().reshape(-1)
 
             for t, p in zip(y_true, y_pred):
-                error_min = abs(t - p)
-                error_sec = error_min * 60.0
+                error_sec = abs(t - p)
+                error_min = error_sec / 60.0
                 error_pct = (error_min / t) * 100 if t != 0 else 0
 
                 if save_result:
@@ -254,6 +254,21 @@ def evaluate(model, elogger, eval_set, save_result=False, split_name='validation
         csv_file.close()
 
     metrics = compute_metrics(all_true, all_pred)
+
+    
+    metrics_file = os.path.join("outputs", "metrics.txt")
+
+    with open(metrics_file, "a") as f:
+        f.write(f"\n=== {split_name.upper()} ===\n")
+        f.write(f"Pooling: {args.pooling_method}\n")
+        f.write(f"Kernel Size: {args.kernel_size}\n")
+        f.write(f"Alpha: {args.alpha}\n")
+        f.write(f"Data Ratio: {args.data_ratio}\n")
+        f.write(f"MAE  : {metrics['MAE']}\n")
+        f.write(f"RMSE : {metrics['RMSE']}\n")
+        f.write(f"MAPE : {metrics['MAPE']}\n")
+        f.write(f"R2   : {metrics['R2']}\n")
+        f.write("-"*40 + "\n")
 
     if verbose:
         print("=" * 50)
